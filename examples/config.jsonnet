@@ -1,107 +1,98 @@
-// Synthetic example gmailctl configuration (v1alpha3) demonstrating the three-tier triage model.
-// Personal configuration must live in a separate private repository.
-local lib = import 'gmailctl.libsonnet';
-
 {
-  version: 'v1alpha3',
-  author: {
-    name: 'Example User',
-    email: 'user@example.com',
+  "version": "v1alpha3",
+  "author": {
+    "name": "Example User",
+    "email": "user@example.com"
   },
-  labels: [
-    { name: 'noise' },
-    { name: 'lists/github' },
-    { name: 'receipts' },
+  "labels": [
+    { "name": "noise" },
+    { "name": "lists/github" },
+    { "name": "receipts" }
   ],
-  rules: [
-    // Tier 1: Deterministic noise routing (unopened / bulk senders without unsubscribe)
+  "rules": [
     {
-      filter: {
-        or: [
-          { from: 'promotions@marketing.example.com' },
-          { list: 'digest.marketing.example.com' },
-        ],
+      "filter": {
+        "or": [
+          { "from": "promotions@marketing.example.com" },
+          { "list": "digest.marketing.example.com" }
+        ]
       },
-      actions: {
-        archive: true,
-        markRead: true,
-        labels: ['noise'],
-      },
-    },
-
-    // Tier 2: Labeled & skip-inbox (proposed by sandboxed local LLM classifier, codified as deterministic rule)
-    {
-      filter: {
-        list: 'notifications.github.com',
-      },
-      actions: {
-        archive: true,
-        labels: ['lists/github'],
-      },
+      "actions": {
+        "archive": true,
+        "markRead": true,
+        "labels": ["noise"]
+      }
     },
     {
-      filter: {
-        from: 'billing@service.example.com',
+      "filter": {
+        "list": "notifications.github.com"
       },
-      actions: {
-        archive: true,
-        labels: ['receipts'],
-      },
+      "actions": {
+        "archive": true,
+        "labels": ["lists/github"]
+      }
     },
-
-    // Tier 3: Actionable / direct correspondence stays in the main inbox (archive: false)
     {
-      filter: {
-        and: [
-          { to: 'user@example.com' },
-          { from: 'teammate@work.example.com' },
-        ],
+      "filter": {
+        "from": "billing@service.example.com"
       },
-      actions: {
-        archive: false,
-        markImportant: true,
-      },
+      "actions": {
+        "archive": true,
+        "labels": ["receipts"]
+      }
     },
+    {
+      "filter": {
+        "and": [
+          { "to": "user@example.com" },
+          { "from": "teammate@work.example.com" }
+        ]
+      },
+      "actions": {
+        "archive": false,
+        "markImportant": true
+      }
+    }
   ],
-  tests: [
+  "tests": [
     {
-      name: 'tier1_bulk_marketing_routed_to_noise',
-      messages: [
+      "name": "tier1_bulk_marketing_routed_to_noise",
+      "messages": [
         {
-          from: 'promotions@marketing.example.com',
-          to: ['user@example.com'],
-        },
+          "from": "promotions@marketing.example.com",
+          "to": ["user@example.com"]
+        }
       ],
-      actions: {
-        archive: true,
-        markRead: true,
-        labels: ['noise'],
-      },
+      "actions": {
+        "archive": true,
+        "markRead": true,
+        "labels": ["noise"]
+      }
     },
     {
-      name: 'tier2_github_notifications_labeled_and_archived',
-      messages: [
+      "name": "tier2_github_notifications_labeled_and_archived",
+      "messages": [
         {
-          lists: ['notifications.github.com'],
-        },
+          "lists": ["notifications.github.com"]
+        }
       ],
-      actions: {
-        archive: true,
-        labels: ['lists/github'],
-      },
+      "actions": {
+        "archive": true,
+        "labels": ["lists/github"]
+      }
     },
     {
-      name: 'tier3_direct_teammate_email_stays_in_inbox',
-      messages: [
+      "name": "tier3_direct_teammate_email_stays_in_inbox",
+      "messages": [
         {
-          from: 'teammate@work.example.com',
-          to: ['user@example.com'],
-        },
+          "from": "teammate@work.example.com",
+          "to": ["user@example.com"]
+        }
       ],
-      actions: {
-        archive: false,
-        markImportant: true,
-      },
-    },
-  ],
+      "actions": {
+        "archive": false,
+        "markImportant": true
+      }
+    }
+  ]
 }
