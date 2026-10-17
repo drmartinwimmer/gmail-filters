@@ -1,11 +1,16 @@
 mod commands;
 mod config;
+mod tier1;
 mod tools;
 
 pub use commands::{GmailTriageCommand, GmailTriageError};
 pub use config::{
     LabelAllowlistConfig, TriageWorkspaceConfig, resolve_config_dir, resolve_config_file_path,
     resolve_or_default_home_config_dir, validate_synthetic_domains,
+};
+pub use tier1::{
+    SenderEngagementMetrics, Tier1Decision, Tier1ThresholdsConfig, UnsubscribeCapability,
+    evaluate_tier1_sender,
 };
 pub use tools::GmailctlRunner;
 
