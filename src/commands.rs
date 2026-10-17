@@ -37,6 +37,10 @@ pub enum GmailTriageError {
         details: String,
     },
 
+    /// Sender engagement metrics failed validation.
+    #[error("Invalid sender engagement metrics: {0}")]
+    InvalidEngagementMetrics(String),
+
     /// I/O error during workspace inspection.
     #[error("I/O error during workspace inspection: {0}")]
     Io(#[from] std::io::Error),
