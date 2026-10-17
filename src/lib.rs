@@ -1,6 +1,13 @@
 mod commands;
+mod config;
+mod tools;
 
-pub use commands::{GmailFiltersCommand, GmailFiltersError};
+pub use commands::{GmailTriageCommand, GmailTriageError};
+pub use config::{
+    LabelAllowlistConfig, TriageWorkspaceConfig, resolve_config_dir, resolve_config_file_path,
+    resolve_or_default_home_config_dir, validate_synthetic_domains,
+};
+pub use tools::GmailctlRunner;
 
 #[cfg(test)]
 mod tests {
