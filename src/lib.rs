@@ -16,7 +16,7 @@ pub use classify::{
 pub use cluster::{
     ClusterKey, EmailCluster, FetchedGmailMessage, GwsHeader, GwsMessageListResponse,
     GwsMessagePayload, GwsMessageResource, GwsMessageStub, cluster_messages, convert_gws_resource,
-    extract_structural_subject_prefix, parse_gws_message_json,
+    extract_structural_subject_prefix, parse_gws_message_json, triage_email_clusters,
 };
 pub use commands::{
     ApplyCommand, AuditCommand, DiffCommand, GmailTriageCommand, GmailTriageError,
@@ -31,7 +31,8 @@ pub use config::{
 pub use synthesize::{
     FilterRuleActions, GmailctlAuthorConfig, GmailctlConfig, GmailctlLabelConfig,
     GmailctlTestConfig, GmailctlTestMessageConfig, RuleDisposition, StructuralFilterCriteria,
-    SynthesizedFilterRule, build_cluster_filter_criteria, synthesize_classifier_rule,
+    SynthesizedFilterRule, build_cluster_filter_criteria, patch_config_jsonnet,
+    synthesize_classifier_rule, synthesize_cluster_tier1_noise_rule,
     synthesize_criteria_classifier_rule, synthesize_tier1_noise_rule,
 };
 pub use tier1::{

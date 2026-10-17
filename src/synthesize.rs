@@ -1,6 +1,6 @@
 use crate::{
-    ClassifierCategory, GmailTriageError, LabelAllowlistConfig, Tier1Decision,
-    ValidatedClassifierDecision,
+    ClassifierCategory, ClusterKey, GmailTriageError, LabelAllowlistConfig, Tier1Decision,
+    ValidatedClassifierDecision, validate_new_label_slug,
 };
 use serde::{Deserialize, Serialize};
 
@@ -387,6 +387,65 @@ pub fn synthesize_criteria_classifier_rule(
     Ok(rule)
 }
 
+/// Synthesizes a deterministic `noise` filter rule for a specific `ClusterKey` when Tier 1 routes to `noise`.
+pub fn synthesize_cluster_tier1_noise_rule(
+    cluster_key: &ClusterKey,
+    decision: &Tier1Decision,
+    allowlist: &LabelAllowlistConfig,
+) -> Result<Option<SynthesizedFilterRule>, GmailTriageError> {
+    match decision {
+        Tier1Decision::RouteToNoise { .. } => {
+            let filter = build_cluster_filter_criteria(
+                &cluster_key.from_address,
+                cluster_key.list_id.as_deref(),
+                cluster_key.to_address.as_deref(),
+                cluster_key.subject_prefix.as_deref(),
+            );
+            let rule = SynthesizedFilterRule {
+                filter,
+                actions: FilterRuleActions {
+                    disposition: RuleDisposition::ArchiveAndMarkRead,
+                    labels: vec!["noise".to_string()],
+                    forward: None,
+                    delete: false,
+                    mark_spam: None,
+                },
+            };
+            rule.validate(allowlist)?;
+            Ok(Some(rule))
+        }
+        Tier1Decision::Unsubscribe { .. } | Tier1Decision::KeepForTriage { .. } => Ok(None),
+    }
+}
+
+/// Patches a `config.jsonnet` document by round-tripping `GmailctlConfig` through `serde_json`,
+/// inserting approved new label slugs into `labels` and validated `SynthesizedFilterRule` entries into `rules`.
+pub fn patch_config_jsonnet(
+    original_jsonnet: &str,
+    new_labels: &[String],
+    new_rules: &[SynthesizedFilterRule],
+    allowlist: &mut LabelAllowlistConfig,
+) -> Result<String, GmailTriageError> {
+    let mut cfg = GmailctlConfig::parse_jsonnet(original_jsonnet)?;
+
+    for raw_slug in new_labels {
+        let slug = validate_new_label_slug(raw_slug)?;
+        allowlist.insert_label(&slug);
+        if !cfg.labels.iter().any(|l| l.name == slug) {
+            cfg.labels.push(GmailctlLabelConfig { name: slug });
+        }
+    }
+
+    for rule in new_rules {
+        rule.validate(allowlist)?;
+        if !cfg.rules.contains(rule) {
+            cfg.rules.push(rule.clone());
+        }
+    }
+
+    cfg.to_jsonnet_pretty()
+}
+
 fn validate_actions_safety(
     actions: &FilterRuleActions,
     allowlist: &LabelAllowlistConfig,
@@ -585,6 +644,41 @@ mod tests {
             let runner = GmailctlRunner::default();
             runner.verify_offline(&roundtrip_dir.path)?;
             runner.verify_offline(&synth_dir.path)?;
+        }
+        Ok(())
+    }
+
+    #[googletest::test]
+    fn patch_config_jsonnet_inserts_new_label_and_rule() -> Result<(), GmailTriageError> {
+        let starter = GmailctlConfig::starter().to_jsonnet_pretty()?;
+        let mut allowlist = LabelAllowlistConfig::parse_jsonnet(&starter)?;
+        let new_labels = vec!["finance/taxes".to_string()];
+        let filter = build_cluster_filter_criteria(
+            "notifications@service.example.com",
+            None,
+            None,
+            Some("Tax Document"),
+        );
+        let decision = ValidatedClassifierDecision {
+            category: ClassifierCategory::Tier2LabelAndArchive,
+            validated_label: None,
+            proposed_new_label: Some("finance/taxes".to_string()),
+            confidence_bps: 9600,
+        };
+        allowlist.insert_label("finance/taxes");
+        let rule = synthesize_criteria_classifier_rule(filter, &decision, &allowlist)?;
+        let patched = patch_config_jsonnet(&starter, &new_labels, &[rule], &mut allowlist)?;
+        assert_that!(patched.contains("\"name\": \"finance/taxes\""), is_true());
+        assert_that!(patched.contains("\"subject\": \"Tax Document\""), is_true());
+
+        let reparsed = LabelAllowlistConfig::parse_jsonnet(&patched)?;
+        assert_that!(reparsed.contains("finance/taxes"), is_true());
+
+        if Command::new("gmailctl").arg("--help").output().is_ok() {
+            let patched_dir = ScopedTempDir::new("patched-config");
+            fs::create_dir_all(&patched_dir.path)?;
+            fs::write(patched_dir.path.join("config.jsonnet"), &patched)?;
+            GmailctlRunner::default().verify_offline(&patched_dir.path)?;
         }
         Ok(())
     }

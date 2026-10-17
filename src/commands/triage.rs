@@ -1,173 +1,115 @@
 use crate::GmailTriageError;
-use crate::classify::{ValidatedClassifierDecision, parse_and_validate_classifier_json};
-use crate::config::{LabelAllowlistConfig, TriageWorkspaceConfig, resolve_config_dir};
-use crate::synthesize::{
-    SynthesizedFilterRule, synthesize_classifier_rule, synthesize_tier1_noise_rule,
-};
-use crate::tier1::{
-    SenderEngagementMetrics, Tier1Decision, Tier1ThresholdsConfig, UnsubscribeCapability,
-    evaluate_tier1_sender,
-};
+pub use crate::cluster::TriageOutcome;
+use crate::cluster::{EmailCluster, triage_email_clusters};
+use crate::config::{TriageWorkspaceConfig, resolve_config_dir};
+use crate::tools::{GwsGmailRunner, LocalClassifierRunner};
 use clap::Args;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Unified outcome of running the 3-tier `triage` pipeline for a sender or message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum TriageOutcome {
-    /// Tier 1: Unsubscribe via verified `List-Unsubscribe` header (no filter rule needed).
-    Unsubscribe {
-        /// Verified sender address.
-        from: String,
-        /// Optional `List-Id` identifier.
-        list_id: Option<String>,
-        /// Detected unsubscribe capability.
-        capability: UnsubscribeCapability,
-    },
-    /// Tier 1 / Tier 2 / Tier 3: Synthesized a validated `gmailctl` filter rule.
-    SynthesizedRule {
-        /// Structured rule representation.
-        rule: SynthesizedFilterRule,
-        /// Rendered `gmailctl` Jsonnet snippet.
-        jsonnet: String,
-    },
-}
-
-/// Arguments for the unified `triage` subcommand.
+/// Arguments for the unified `triage` subcommand (`gmail-triage triage`), which fetches messages
+/// from Gmail via `gws`, groups them into sender/stream sub-clusters, evaluates Tier 1 deterministic
+/// rules and the sandboxed Tier 2/3 LLM classifier, and synthesizes `gmailctl` filter rules.
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct TriageCommand {
     /// Path to configuration directory (defaults to `$GMAIL_TRIAGE_CONFIG_DIR` or `~/.config/gmail-triage`)
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Verified sender address (`from`)
+    /// Gmail search query used when fetching messages via `gws` (default: `in:inbox`)
+    #[arg(long, default_value = "in:inbox")]
+    query: String,
+
+    /// Maximum number of messages to fetch via `gws`
+    #[arg(long, default_value_t = 50)]
+    max_messages: u32,
+
+    /// Patch `<config-dir>/config.jsonnet` in place with newly proposed labels and synthesized rules
     #[arg(long)]
-    from: String,
+    write_config: bool,
+}
 
-    /// Optional mailing list identifier (`List-Id`)
-    #[arg(long)]
-    list_id: Option<String>,
-
-    /// Total messages received from this sender in the observation window
-    #[arg(long, default_value_t = 0)]
-    total_received: u32,
-
-    /// Number of messages opened by the user
-    #[arg(long, default_value_t = 0)]
-    opened_count: u32,
-
-    /// Number of messages archived without reading
-    #[arg(long, default_value_t = 0)]
-    archived_unread_count: u32,
-
-    /// Whether `List-Unsubscribe` header is present
-    #[arg(long)]
-    has_unsubscribe: bool,
-
-    /// Whether `Precedence: bulk` header is present
-    #[arg(long)]
-    precedence_bulk: bool,
-
-    /// Optional JSON decision from the sandboxed local LLM classifier for Tier 2 / Tier 3
-    #[arg(long)]
-    decision_json: Option<String>,
+impl Default for TriageCommand {
+    fn default() -> Self {
+        Self {
+            config: None,
+            query: "in:inbox".to_string(),
+            max_messages: 50,
+            write_config: false,
+        }
+    }
 }
 
 impl TriageCommand {
-    /// Creates a new `TriageCommand` from a `SenderEngagementMetrics` value and optional classifier JSON.
-    pub fn from_metrics(
+    /// Creates a new `TriageCommand` that fetches messages matching `query` via `gws`.
+    pub fn new(
         config: Option<PathBuf>,
-        metrics: SenderEngagementMetrics,
-        decision_json: Option<String>,
+        query: impl Into<String>,
+        max_messages: u32,
+        write_config: bool,
     ) -> Self {
         Self {
             config,
-            from: metrics.from,
-            list_id: metrics.list_id,
-            total_received: metrics.total_received,
-            opened_count: metrics.opened_count,
-            archived_unread_count: metrics.archived_unread_count,
-            has_unsubscribe: metrics.unsubscribe != UnsubscribeCapability::None,
-            precedence_bulk: metrics.precedence_bulk,
-            decision_json,
+            query: query.into(),
+            max_messages,
+            write_config,
         }
     }
 
-    /// Executes the unified 3-tier triage pipeline, hiding internal Tier 1 / Tier 2 / synthesis steps.
-    pub fn run(self) -> Result<TriageOutcome, GmailTriageError> {
+    /// Evaluates a slice of `EmailCluster` streams through Tier 1 and the configured `LocalClassifierRunner`,
+    /// optionally patching `<target_dir>/config.jsonnet` with approved new labels and synthesized rules.
+    pub fn triage_clusters(
+        target_dir: &Path,
+        clusters: &[EmailCluster],
+        classifier: &LocalClassifierRunner,
+        write_config: bool,
+    ) -> Result<Vec<TriageOutcome>, GmailTriageError> {
+        triage_email_clusters(target_dir, clusters, classifier, write_config)
+    }
+
+    /// Executes the unified 3-tier triage pipeline by fetching messages via `gws`, clustering by
+    /// sender and stream, and evaluating Tier 1 + the sandboxed local LLM classifier.
+    pub fn run(self) -> Result<Vec<TriageOutcome>, GmailTriageError> {
         let target_dir = resolve_config_dir(self.config)?;
         let workspace_cfg = TriageWorkspaceConfig::load_from_dir(&target_dir)?;
-        let allowlist = LabelAllowlistConfig::load_from_path(&target_dir)?;
-
-        let unsubscribe = if self.has_unsubscribe {
-            UnsubscribeCapability::HeaderPresent
-        } else {
-            UnsubscribeCapability::None
-        };
-        let metrics = SenderEngagementMetrics {
-            from: self.from.clone(),
-            list_id: self.list_id.clone(),
-            unsubscribe,
-            precedence_bulk: self.precedence_bulk,
-            total_received: self.total_received,
-            opened_count: self.opened_count,
-            archived_unread_count: self.archived_unread_count,
-        };
-        let thresholds = Tier1ThresholdsConfig {
-            min_messages_for_engagement: workspace_cfg.min_messages_for_engagement,
-            max_open_rate_bps: workspace_cfg.max_open_rate_bps,
-            min_unread_archive_rate_bps: workspace_cfg.min_unread_archive_rate_bps,
-        };
-
-        let tier1_decision = evaluate_tier1_sender(&metrics, &thresholds)?;
-        match tier1_decision {
-            Tier1Decision::Unsubscribe {
-                from,
-                list_id,
-                capability,
-            } => Ok(TriageOutcome::Unsubscribe {
-                from,
-                list_id,
-                capability,
-            }),
-            Tier1Decision::RouteToNoise { .. } => {
-                let rule =
-                    synthesize_tier1_noise_rule(&tier1_decision, &allowlist)?.ok_or_else(|| {
-                        GmailTriageError::ForbiddenFilterRule(
-                            "Failed to synthesize Tier 1 noise rule".to_string(),
-                        )
-                    })?;
-                let jsonnet = rule.to_jsonnet(&allowlist)?;
-                Ok(TriageOutcome::SynthesizedRule { rule, jsonnet })
-            }
-            Tier1Decision::KeepForTriage { .. } => {
-                let raw_json = self.decision_json.ok_or_else(|| {
-                    GmailTriageError::MissingClassifierDecision(self.from.clone())
-                })?;
-                let validated: ValidatedClassifierDecision = parse_and_validate_classifier_json(
-                    &raw_json,
-                    &allowlist,
-                    workspace_cfg.min_confidence_bps,
-                )?;
-                let rule = synthesize_classifier_rule(
-                    &self.from,
-                    self.list_id.as_deref(),
-                    &validated,
-                    &allowlist,
-                )?;
-                let jsonnet = rule.to_jsonnet(&allowlist)?;
-                Ok(TriageOutcome::SynthesizedRule { rule, jsonnet })
-            }
-        }
+        let classifier = LocalClassifierRunner::from_workspace_config(&workspace_cfg);
+        let gws = GwsGmailRunner::default();
+        let clusters = gws.fetch_and_cluster(Some(&self.query), self.max_messages)?;
+        Self::triage_clusters(&target_dir, &clusters, &classifier, self.write_config)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuditCommand, GmailTriageCommand, GmailTriageSubcommand};
+    use crate::classify::{UntrustedEmailInput, sanitize_untrusted_email};
+    use crate::cluster::ClusterKey;
+    use crate::tier1::{SenderEngagementMetrics, UnsubscribeCapability};
+    use crate::{
+        AuditCommand, FetchedGmailMessage, GmailTriageCommand, GmailTriageSubcommand,
+        GmailctlConfig, InitCommand, cluster_messages,
+    };
     use googletest::prelude::*;
+    use std::fs;
+
+    struct ScopedTempDir {
+        path: PathBuf,
+    }
+
+    impl ScopedTempDir {
+        fn new(suffix: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("gmail-triage-{suffix}-{}", std::process::id()));
+            Self { path }
+        }
+    }
+
+    impl Drop for ScopedTempDir {
+        fn drop(&mut self) {
+            if self.path.exists() {
+                drop(fs::remove_dir_all(&self.path));
+            }
+        }
+    }
 
     #[googletest::test]
     fn user_journey_triage_and_audit_subcommands_succeed() -> Result<(), GmailTriageError> {
@@ -179,76 +121,178 @@ mod tests {
         );
         assert_that!(audit_cmd.run(), ok(anything()));
 
-        // Tier 1 unopened sender with unsubscribe -> Unsubscribe outcome
-        let tier1_unsub = TriageCommand::from_metrics(
-            Some(examples.clone()),
-            SenderEngagementMetrics {
-                from: "newsletter@marketing.example.com".to_string(),
-                list_id: Some("digest.marketing.example.com".to_string()),
-                unsubscribe: UnsubscribeCapability::HeaderPresent,
-                precedence_bulk: true,
-                total_received: 10,
-                opened_count: 0,
-                archived_unread_count: 10,
+        let clusters = vec![
+            // Tier 1 unopened sender with unsubscribe -> Unsubscribe outcome
+            EmailCluster {
+                key: ClusterKey {
+                    from_address: "newsletter@marketing.example.com".to_string(),
+                    list_id: Some("digest.marketing.example.com".to_string()),
+                    to_address: None,
+                    subject_prefix: None,
+                },
+                engagement: SenderEngagementMetrics {
+                    from: "newsletter@marketing.example.com".to_string(),
+                    list_id: Some("digest.marketing.example.com".to_string()),
+                    unsubscribe: UnsubscribeCapability::HeaderPresent,
+                    precedence_bulk: true,
+                    total_received: 10,
+                    opened_count: 0,
+                    archived_unread_count: 10,
+                },
+                representative_sample: sanitize_untrusted_email(&UntrustedEmailInput {
+                    from: "newsletter@marketing.example.com".to_string(),
+                    list_id: Some("digest.marketing.example.com".to_string()),
+                    raw_subject: "Weekly Digest".to_string(),
+                    raw_body: "Unsubscribe anytime.".to_string(),
+                }),
             },
-            None,
+            // Tier 1 unopened sender without unsubscribe -> Synthesized noise rule
+            EmailCluster {
+                key: ClusterKey {
+                    from_address: "promotions@marketing.example.com".to_string(),
+                    list_id: None,
+                    to_address: None,
+                    subject_prefix: None,
+                },
+                engagement: SenderEngagementMetrics {
+                    from: "promotions@marketing.example.com".to_string(),
+                    list_id: None,
+                    unsubscribe: UnsubscribeCapability::None,
+                    precedence_bulk: true,
+                    total_received: 10,
+                    opened_count: 0,
+                    archived_unread_count: 10,
+                },
+                representative_sample: sanitize_untrusted_email(&UntrustedEmailInput {
+                    from: "promotions@marketing.example.com".to_string(),
+                    list_id: None,
+                    raw_subject: "Flash Sale".to_string(),
+                    raw_body: "50% off today.".to_string(),
+                }),
+            },
+            // Tier 2 engaged sender classified by sandboxed runner -> Synthesized skip-inbox rule
+            EmailCluster {
+                key: ClusterKey {
+                    from_address: "billing@service.example.com".to_string(),
+                    list_id: None,
+                    to_address: None,
+                    subject_prefix: None,
+                },
+                engagement: SenderEngagementMetrics {
+                    from: "billing@service.example.com".to_string(),
+                    list_id: None,
+                    unsubscribe: UnsubscribeCapability::None,
+                    precedence_bulk: false,
+                    total_received: 5,
+                    opened_count: 4,
+                    archived_unread_count: 1,
+                },
+                representative_sample: sanitize_untrusted_email(&UntrustedEmailInput {
+                    from: "billing@service.example.com".to_string(),
+                    list_id: None,
+                    raw_subject: "Invoice #42".to_string(),
+                    raw_body: "Amount due: $10.".to_string(),
+                }),
+            },
+        ];
+
+        let classifier = LocalClassifierRunner::new_fence_command(
+            r#"cat >/dev/null && printf '{"category":"tier2_label_and_archive","proposed_label":"receipts","confidence":0.94}'"#,
         );
-        let unsub_outcome = tier1_unsub.run()?;
+        let outcomes = TriageCommand::triage_clusters(&examples, &clusters, &classifier, false)?;
+        assert_that!(outcomes.len(), eq(3));
         assert_that!(
-            unsub_outcome,
-            eq(&TriageOutcome::Unsubscribe {
+            outcomes.first(),
+            some(eq(&TriageOutcome::Unsubscribe {
                 from: "newsletter@marketing.example.com".to_string(),
                 list_id: Some("digest.marketing.example.com".to_string()),
                 capability: UnsubscribeCapability::HeaderPresent,
-            })
+            }))
         );
-
-        // Tier 1 unopened sender without unsubscribe -> Synthesized noise rule
-        let tier1_noise = TriageCommand::from_metrics(
-            Some(examples.clone()),
-            SenderEngagementMetrics {
-                from: "promotions@marketing.example.com".to_string(),
-                list_id: None,
-                unsubscribe: UnsubscribeCapability::None,
-                precedence_bulk: true,
-                total_received: 10,
-                opened_count: 0,
-                archived_unread_count: 10,
-            },
-            None,
-        );
-        let noise_outcome = tier1_noise.run()?;
-        let TriageOutcome::SynthesizedRule { jsonnet, .. } = noise_outcome else {
+        let Some(TriageOutcome::SynthesizedRule {
+            jsonnet: noise_jsonnet,
+            ..
+        }) = outcomes.get(1)
+        else {
             return Err(GmailTriageError::ForbiddenFilterRule(
-                "Expected SynthesizedRule".to_string(),
+                "Expected noise SynthesizedRule".to_string(),
             ));
         };
-        assert_that!(jsonnet.contains("\"noise\""), is_true());
+        assert_that!(noise_jsonnet.contains("\"noise\""), is_true());
 
-        // Tier 2 engaged sender with sandboxed classifier JSON -> Synthesized skip-inbox rule
-        let raw_json =
-            r#"{"category":"tier2_label_and_archive","proposed_label":"receipts","confidence":0.94}"#
-                .to_string();
-        let tier2_cmd = TriageCommand::from_metrics(
-            Some(examples),
-            SenderEngagementMetrics {
-                from: "billing@service.example.com".to_string(),
+        let Some(TriageOutcome::SynthesizedRule {
+            jsonnet: tier2_jsonnet,
+            ..
+        }) = outcomes.get(2)
+        else {
+            return Err(GmailTriageError::ForbiddenFilterRule(
+                "Expected Tier 2 SynthesizedRule".to_string(),
+            ));
+        };
+        assert_that!(tier2_jsonnet.contains("\"receipts\""), is_true());
+        Ok(())
+    }
+
+    #[googletest::test]
+    fn triage_clusters_patches_config_jsonnet_with_new_label_and_subcluster_rules()
+    -> Result<(), GmailTriageError> {
+        let guard = ScopedTempDir::new("e2e-test");
+        InitCommand::new(Some(guard.path.clone())).run()?;
+
+        let messages = vec![
+            FetchedGmailMessage {
+                id: "m1".to_string(),
+                from_address: "notifications@service.example.com".to_string(),
+                to_address: Some("user@example.com".to_string()),
+                raw_subject: "Security Alert: New sign-in".to_string(),
                 list_id: None,
                 unsubscribe: UnsubscribeCapability::None,
                 precedence_bulk: false,
-                total_received: 5,
-                opened_count: 4,
-                archived_unread_count: 1,
+                raw_snippet: "A new device signed in.".to_string(),
+                is_unread: false,
+                in_inbox: true,
             },
-            Some(raw_json),
+            FetchedGmailMessage {
+                id: "m2".to_string(),
+                from_address: "notifications@service.example.com".to_string(),
+                to_address: Some("user@example.com".to_string()),
+                raw_subject: "Invoice #900".to_string(),
+                list_id: None,
+                unsubscribe: UnsubscribeCapability::None,
+                precedence_bulk: false,
+                raw_snippet: "Your monthly invoice.".to_string(),
+                is_unread: false,
+                in_inbox: true,
+            },
+        ];
+        let clusters = cluster_messages(&messages);
+        assert_that!(clusters.len(), eq(2));
+
+        let classifier = LocalClassifierRunner::new_fence_command(
+            r#"cat >/dev/null && printf '{"category":"tier2_label_and_archive","proposed_new_label":"security/alerts","confidence":0.95}'"#,
         );
-        let tier2_outcome = tier2_cmd.run()?;
-        let TriageOutcome::SynthesizedRule { jsonnet, .. } = tier2_outcome else {
-            return Err(GmailTriageError::ForbiddenFilterRule(
-                "Expected SynthesizedRule".to_string(),
-            ));
-        };
-        assert_that!(jsonnet.contains("\"receipts\""), is_true());
+        let outcomes = TriageCommand::triage_clusters(&guard.path, &clusters, &classifier, true)?;
+        assert_that!(outcomes.len(), eq(2));
+
+        let patched_content = fs::read_to_string(guard.path.join("config.jsonnet"))?;
+        let parsed_cfg = GmailctlConfig::parse_jsonnet(&patched_content)?;
+        assert_that!(
+            parsed_cfg
+                .labels
+                .iter()
+                .any(|l| l.name == "security/alerts"),
+            is_true()
+        );
+        assert_that!(parsed_cfg.rules.len(), eq(2));
+        assert_that!(
+            patched_content.contains("\"subject\": \"security\""),
+            is_true()
+        );
+        assert_that!(
+            patched_content.contains("\"subject\": \"invoice\""),
+            is_true()
+        );
+
         Ok(())
     }
 }

@@ -55,27 +55,21 @@ gmail-triage init
 gmail-triage audit --run-gmailctl
 ```
 
-### Triage a Sender Through the 3-Tier Pipeline
+### Triage Emails Through the 3-Tier Pipeline (`gws` + Sub-Clustering + Sandboxed Local LLM)
 
-`gmail-triage triage` hides the multi-tier complexity behind a single command—evaluating Tier 1 deterministic unopened/bulk signals first, and falling back to Tier 2/3 validated classification and rule synthesis when needed:
+`gmail-triage triage` hides the multi-tier complexity behind a single command:
+
+- **Live Gmail Fetch via `gws`**: `gmail-triage triage` invokes the `gws` CLI (`gws gmail users messages list` / `get`) to fetch messages matching `--query` (default `in:inbox`).
+- **Sub-Cluster Grouping**: Messages from the same sender are automatically sub-clustered by `(from, list_id, recipient_to, subject_prefix)` so distinct streams (e.g., invoices vs. security alerts vs. newsletters) get distinct `and: [{ from: '...' }, { to: '...' }, { subject: '...' }]` rules.
+- **Pluggable Sandboxed Local LLM (`gmail-triage.toml`)**: Supports mutually exclusive backend variants under `[backend]`: `type = "open_ai_http"` (any OpenAI-compatible `/v1/chat/completions` endpoint, defaulting to local Ollama at `http://127.0.0.1:11434/v1/chat/completions`, with `"tools": []` and `response_format` JSON Schema enforcement) or `type = "fence_command"` (running `fence -n -- ...` with the sanitized prompt piped via `stdin`).
+- **New Label Proposals**: The classifier can either pick an existing label (`proposed_label`) or propose a new label slug (`proposed_new_label` validated against `^[a-z0-9]+(/[a-z0-9_-]+)*$`). Passing `--write-config` patches `<config-dir>/config.jsonnet` with both newly approved labels and synthesized rules.
 
 ```bash
-# Tier 1: Unopened bulk sender -> recommends unsubscribe or synthesizes a 'noise' rule
-gmail-triage triage \
-  --config examples \
-  --from promotions@marketing.example.com \
-  --total-received 10 \
-  --opened-count 0 \
-  --archived-unread-count 10 \
-  --precedence-bulk
+# Fetch live inbox messages via gws, cluster by sender/stream, classify via local LLM, and preview outcomes
+gmail-triage triage --query "in:inbox" --max-messages 50
 
-# Tier 2: Engaged sender with sandboxed classifier output -> synthesizes a skip-inbox rule
-gmail-triage triage \
-  --config examples \
-  --from billing@service.example.com \
-  --total-received 6 \
-  --opened-count 5 \
-  --decision-json '{"category":"tier2_label_and_archive","proposed_label":"receipts","confidence":0.94}'
+# Fetch, triage, and patch <config-dir>/config.jsonnet in place with new labels and rules
+gmail-triage triage --query "in:inbox" --max-messages 50 --write-config
 ```
 
 ### Wrapped `gmailctl` Commands (Auto-Injects `--config`)
