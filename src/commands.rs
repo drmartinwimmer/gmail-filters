@@ -41,6 +41,23 @@ pub enum GmailTriageError {
     #[error("Invalid sender engagement metrics: {0}")]
     InvalidEngagementMetrics(String),
 
+    /// Sandboxed classifier output did not match the required JSON schema.
+    #[error("Invalid classifier JSON output: {0}")]
+    InvalidClassifierJson(String),
+
+    /// Classifier proposed a label that is not in the declared `config.jsonnet` allowlist.
+    #[error("Classifier proposed disallowed label '{0}'")]
+    DisallowedClassifierLabel(String),
+
+    /// Classifier confidence was below the minimum required threshold.
+    #[error("Classifier confidence {actual_bps} bps is below minimum threshold {min_bps} bps")]
+    LowClassifierConfidence {
+        /// Actual confidence in basis points.
+        actual_bps: u32,
+        /// Minimum required confidence in basis points.
+        min_bps: u32,
+    },
+
     /// I/O error during workspace inspection.
     #[error("I/O error during workspace inspection: {0}")]
     Io(#[from] std::io::Error),

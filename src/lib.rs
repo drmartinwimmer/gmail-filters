@@ -1,8 +1,14 @@
+mod classify;
 mod commands;
 mod config;
 mod tier1;
 mod tools;
 
+pub use classify::{
+    ClassifierCategory, ClassifierRawOutput, MAX_BODY_SNIPPET_CHARS, MAX_SUBJECT_CHARS,
+    SanitizedEmailEnvelope, UntrustedEmailInput, ValidatedClassifierDecision,
+    parse_and_validate_classifier_json, sanitize_untrusted_email, validate_classifier_output,
+};
 pub use commands::{GmailTriageCommand, GmailTriageError};
 pub use config::{
     LabelAllowlistConfig, TriageWorkspaceConfig, resolve_config_dir, resolve_config_file_path,
