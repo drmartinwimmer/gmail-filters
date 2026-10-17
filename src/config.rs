@@ -12,8 +12,67 @@ const ENV_XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 const ENV_HOME: &str = "HOME";
 const DEFAULT_SUBDIR: &str = "gmail-triage";
 
+/// Configuration for an OpenAI-compatible HTTP `/v1/chat/completions` classifier backend
+/// (defaults to local Ollama at `http://127.0.0.1:11434/v1/chat/completions`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpenAiBackendConfig {
+    /// OpenAI-compatible `/v1/chat/completions` endpoint URL (default `http://127.0.0.1:11434/v1/chat/completions` for local Ollama).
+    pub url: String,
+    /// Model identifier (default `qwen2.5:7b-instruct`).
+    pub model: String,
+    /// Optional environment variable name containing a Bearer API key (not needed for local Ollama).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+}
+
+impl Default for OpenAiBackendConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://127.0.0.1:11434/v1/chat/completions".to_string(),
+            model: "qwen2.5:7b-instruct".to_string(),
+            api_key_env: None,
+        }
+    }
+}
+
+/// Configuration for the fence-sandboxed CLI classifier backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FenceCommandBackendConfig {
+    /// Command line for the sandboxed CLI classifier receiving the prompt via `stdin`.
+    pub command: String,
+}
+
+impl Default for FenceCommandBackendConfig {
+    fn default() -> Self {
+        Self {
+            command: "fence -n -- opencode run --format json".to_string(),
+        }
+    }
+}
+
+/// Mutually exclusive local/sandboxed LLM backend configuration for Tier 2 / Tier 3 classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClassifierBackendConfig {
+    /// OpenAI-compatible HTTP `/v1/chat/completions` endpoint (e.g., local Ollama at `http://127.0.0.1:11434/v1/chat/completions`, `llama-server`, `vLLM`, or `LM Studio`) with `"tools": []` and structured JSON schema output.
+    #[serde(alias = "openai", alias = "ollama", alias = "ollama_http")]
+    OpenAiHttp(OpenAiBackendConfig),
+    /// Sandboxed CLI runner (`fence` with network disabled or a custom command receiving the prompt via `stdin`).
+    #[serde(alias = "fence", alias = "command")]
+    FenceCommand(FenceCommandBackendConfig),
+}
+
+impl Default for ClassifierBackendConfig {
+    fn default() -> Self {
+        Self::OpenAiHttp(OpenAiBackendConfig::default())
+    }
+}
+
 /// User settings stored in `<config-dir>/gmail-triage.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TriageWorkspaceConfig {
     /// Minimum classifier confidence in basis points (`0..=10_000`, default `7500` = `0.75`).
     pub min_confidence_bps: u32,
@@ -23,6 +82,8 @@ pub struct TriageWorkspaceConfig {
     pub max_open_rate_bps: u32,
     /// Minimum unread-archive rate in basis points (`0..=10_000`, default `8000` = `80.00%`) considered ignored.
     pub min_unread_archive_rate_bps: u32,
+    /// Mutually exclusive local/sandboxed classifier backend configuration.
+    pub backend: ClassifierBackendConfig,
 }
 
 impl Default for TriageWorkspaceConfig {
@@ -32,6 +93,7 @@ impl Default for TriageWorkspaceConfig {
             min_messages_for_engagement: 5,
             max_open_rate_bps: 1000,
             min_unread_archive_rate_bps: 8000,
+            backend: ClassifierBackendConfig::default(),
         }
     }
 }
@@ -44,47 +106,19 @@ impl TriageWorkspaceConfig {
             return Ok(Self::default());
         }
         let content = fs::read_to_string(&settings_path)?;
-        Self::parse_toml_subset(&content)
+        Self::from_toml_str(&content)
     }
 
-    /// Parses simple `key = value` integer entries from `gmail-triage.toml`.
-    pub fn parse_toml_subset(content: &str) -> Result<Self, GmailTriageError> {
-        let mut cfg = Self::default();
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('[') {
-                continue;
-            }
-            let Some((key, raw_val)) = trimmed.split_once('=') else {
-                continue;
-            };
-            let key = key.trim();
-            let val_str = raw_val.split('#').next().unwrap_or("").trim();
-            let parsed_val: u32 = val_str.parse().map_err(|err| {
-                GmailTriageError::InvalidTriageConfig(format!(
-                    "Invalid integer value '{val_str}' for key '{key}': {err}"
-                ))
-            })?;
-            match key {
-                "min_confidence_bps" => cfg.min_confidence_bps = parsed_val,
-                "min_messages_for_engagement" => cfg.min_messages_for_engagement = parsed_val,
-                "max_open_rate_bps" => cfg.max_open_rate_bps = parsed_val,
-                "min_unread_archive_rate_bps" => cfg.min_unread_archive_rate_bps = parsed_val,
-                _ => {}
-            }
-        }
-        Ok(cfg)
+    /// Deserializes `TriageWorkspaceConfig` from a `gmail-triage.toml` document via `serde` and `toml`.
+    pub fn from_toml_str(content: &str) -> Result<Self, GmailTriageError> {
+        toml::from_str(content)
+            .map_err(|err| GmailTriageError::InvalidTriageConfig(err.to_string()))
     }
 
-    /// Renders default `gmail-triage.toml` contents for `gmail-triage init`.
-    pub fn to_toml_string(&self) -> String {
-        format!(
-            "# gmail-triage configuration\nmin_confidence_bps = {}\nmin_messages_for_engagement = {}\nmax_open_rate_bps = {}\nmin_unread_archive_rate_bps = {}\n",
-            self.min_confidence_bps,
-            self.min_messages_for_engagement,
-            self.max_open_rate_bps,
-            self.min_unread_archive_rate_bps
-        )
+    /// Serializes `TriageWorkspaceConfig` to pretty-printed TOML for `gmail-triage init`.
+    pub fn to_toml_string(&self) -> Result<String, GmailTriageError> {
+        toml::to_string_pretty(self)
+            .map_err(|err| GmailTriageError::InvalidTriageConfig(err.to_string()))
     }
 }
 
@@ -130,6 +164,11 @@ impl LabelAllowlistConfig {
     /// Checks whether a proposed label is present in the declared allowlist.
     pub fn contains(&self, label: &str) -> bool {
         self.labels.contains(label)
+    }
+
+    /// Registers an approved new label into the allowlist.
+    pub fn insert_label(&mut self, label: impl Into<String>) -> bool {
+        self.labels.insert(label.into())
     }
 
     /// Returns an ordered iterator over the allowed labels.
@@ -284,12 +323,39 @@ mod tests {
 
     #[googletest::test]
     fn parse_triage_workspace_config_succeeds() -> Result<(), GmailTriageError> {
-        let toml = "min_confidence_bps = 8500\nmin_messages_for_engagement = 10\n";
-        let cfg = TriageWorkspaceConfig::parse_toml_subset(toml)?;
+        let toml = r#"
+min_confidence_bps = 8500
+min_messages_for_engagement = 10
+
+[backend]
+type = "open_ai_http"
+model = "llama3.2:3b"
+"#;
+        let cfg = TriageWorkspaceConfig::from_toml_str(toml)?;
         assert_that!(cfg.min_confidence_bps, eq(8500));
         assert_that!(cfg.min_messages_for_engagement, eq(10));
         assert_that!(cfg.max_open_rate_bps, eq(1000));
+        assert_that!(
+            &cfg.backend,
+            eq(&ClassifierBackendConfig::OpenAiHttp(OpenAiBackendConfig {
+                url: "http://127.0.0.1:11434/v1/chat/completions".to_string(),
+                model: "llama3.2:3b".to_string(),
+                api_key_env: None,
+            }))
+        );
         Ok(())
+    }
+
+    #[googletest::test]
+    fn parse_triage_workspace_config_rejects_mixed_backend_fields() {
+        let toml = r#"
+[backend]
+type = "fence_command"
+command = "fence -n -- opencode run --format json"
+model = "llama3.2:3b"
+"#;
+        let result = TriageWorkspaceConfig::from_toml_str(toml);
+        assert_that!(result, err(anything()));
     }
 
     #[googletest::test]

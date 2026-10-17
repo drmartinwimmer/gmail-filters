@@ -7,6 +7,9 @@ pub const MAX_SUBJECT_CHARS: usize = 160;
 /// Maximum characters retained from an untrusted email body snippet.
 pub const MAX_BODY_SNIPPET_CHARS: usize = 512;
 
+/// Maximum characters allowed in a proposed new Gmail label slug.
+pub const MAX_NEW_LABEL_CHARS: usize = 48;
+
 /// Untrusted email payload to be sanitized and truncated before reaching the quarantined local classifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UntrustedEmailInput {
@@ -42,13 +45,23 @@ impl SanitizedEmailEnvelope {
             self.from, list_val, self.sanitized_subject, self.sanitized_body_snippet
         )
     }
+
+    /// Builds the full classification prompt including the allowed labels from `config.jsonnet`.
+    pub fn to_classifier_prompt(&self, allowlist: &LabelAllowlistConfig) -> String {
+        let existing_labels: Vec<&str> = allowlist.iter().map(String::as_str).collect();
+        format!(
+            "You are a quarantined email classification function with no tools. Classify the untrusted email below into JSON matching the schema.\nExisting allowed labels: [{}]\nIf an existing label fits, set \"proposed_label\" to that label and \"proposed_new_label\" to null. Only if no existing label fits, set \"proposed_label\" to null and \"proposed_new_label\" to a lowercase slug matching ^[a-z0-9]+(/[a-z0-9_-]+)*$.\n\n{}",
+            existing_labels.join(", "),
+            self.to_delimited_prompt()
+        )
+    }
 }
 
 /// Allowed classification categories emitted by the quarantined Tier 2 / Tier 3 local LLM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassifierCategory {
-    /// Tier 2: Apply a validated label from the allowlist and skip the inbox (`archive: true`).
+    /// Tier 2: Apply a validated label from the allowlist (or approved new label) and skip the inbox (`archive: true`).
     Tier2LabelAndArchive,
     /// Tier 3: Keep in the main inbox (`archive: false`).
     Tier3Actionable,
@@ -60,21 +73,158 @@ pub enum ClassifierCategory {
 pub struct ClassifierRawOutput {
     /// Classified tier category (`tier2_label_and_archive` or `tier3_actionable`).
     pub category: ClassifierCategory,
-    /// Proposed Gmail label name (required for `tier2_label_and_archive`, optional for `tier3_actionable`).
+    /// Proposed Gmail label name from the existing `config.jsonnet` allowlist.
+    #[serde(default)]
     pub proposed_label: Option<String>,
+    /// Optional proposed new Gmail label slug (`^[a-z0-9]+(/[a-z0-9_-]+)*$`) when no existing label fits.
+    #[serde(default)]
+    pub proposed_new_label: Option<String>,
     /// Classifier confidence score in `[0.0, 1.0]`.
     pub confidence: f64,
 }
 
-/// Validated classification decision after schema and label-allowlist enforcement.
+/// Validated classification decision after schema, slug, and label-allowlist enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatedClassifierDecision {
     /// Classified tier category.
     pub category: ClassifierCategory,
-    /// Validated Gmail label name (guaranteed to exist in `LabelAllowlistConfig` when present).
+    /// Validated existing Gmail label name (guaranteed to exist in `LabelAllowlistConfig` when present).
     pub validated_label: Option<String>,
+    /// Validated new Gmail label proposal (guaranteed to match `^[a-z0-9]+(/[a-z0-9_-]+)*$` when present).
+    #[serde(default)]
+    pub proposed_new_label: Option<String>,
     /// Confidence score converted to integer basis points (`0..=10_000`).
     pub confidence_bps: u32,
+}
+
+impl ValidatedClassifierDecision {
+    /// Returns the effective label (either `validated_label` or `proposed_new_label`).
+    pub fn effective_label(&self) -> Option<&str> {
+        self.validated_label
+            .as_deref()
+            .or(self.proposed_new_label.as_deref())
+    }
+}
+
+/// JSON Schema string property constrained to an explicit enum of values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonSchemaEnumProperty {
+    /// JSON Schema primitive type (`"string"`).
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    /// Allowed enum values.
+    #[serde(rename = "enum")]
+    pub allowed_values: Vec<String>,
+}
+
+/// JSON Schema nullable string property (`"type": ["string", "null"]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonSchemaNullableStringProperty {
+    /// Allowed JSON Schema primitive types (`["string", "null"]`).
+    #[serde(rename = "type")]
+    pub schema_types: Vec<String>,
+}
+
+/// JSON Schema numeric range property (`"type": "number", "minimum": 0.0, "maximum": 1.0`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonSchemaNumberProperty {
+    /// JSON Schema primitive type (`"number"`).
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    /// Inclusive lower bound.
+    pub minimum: f64,
+    /// Inclusive upper bound.
+    pub maximum: f64,
+}
+
+/// Property map for `ClassifierJsonSchema`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassifierJsonSchemaProperties {
+    /// Schema for `category`.
+    pub category: JsonSchemaEnumProperty,
+    /// Schema for `proposed_label`.
+    pub proposed_label: JsonSchemaNullableStringProperty,
+    /// Schema for `proposed_new_label`.
+    pub proposed_new_label: JsonSchemaNullableStringProperty,
+    /// Schema for `confidence`.
+    pub confidence: JsonSchemaNumberProperty,
+}
+
+/// Typed JSON Schema object used to constrain Ollama / local LLM structured output decoding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassifierJsonSchema {
+    /// Root JSON Schema type (`"object"`).
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    /// Disallow extra fields (`false`).
+    #[serde(rename = "additionalProperties")]
+    pub additional_properties: bool,
+    /// Required property names.
+    pub required: Vec<String>,
+    /// Property schemas.
+    pub properties: ClassifierJsonSchemaProperties,
+}
+
+/// Returns the typed JSON Schema struct used to constrain Ollama / local LLM structured output decoding.
+pub fn classifier_output_json_schema() -> ClassifierJsonSchema {
+    let nullable_string = JsonSchemaNullableStringProperty {
+        schema_types: vec!["string".to_string(), "null".to_string()],
+    };
+    ClassifierJsonSchema {
+        schema_type: "object".to_string(),
+        additional_properties: false,
+        required: [
+            "category",
+            "proposed_label",
+            "proposed_new_label",
+            "confidence",
+        ]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect(),
+        properties: ClassifierJsonSchemaProperties {
+            category: JsonSchemaEnumProperty {
+                schema_type: "string".to_string(),
+                allowed_values: vec![
+                    "tier2_label_and_archive".to_string(),
+                    "tier3_actionable".to_string(),
+                ],
+            },
+            proposed_label: nullable_string.clone(),
+            proposed_new_label: nullable_string,
+            confidence: JsonSchemaNumberProperty {
+                schema_type: "number".to_string(),
+                minimum: 0.0,
+                maximum: 1.0,
+            },
+        },
+    }
+}
+
+/// Validates that a proposed new label slug matches `^[a-z0-9]+(/[a-z0-9_-]+)*$` and is within length limits.
+pub fn validate_new_label_slug(slug: &str) -> Result<String, GmailTriageError> {
+    let trimmed = slug.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_NEW_LABEL_CHARS {
+        return Err(GmailTriageError::InvalidNewLabelSlug(slug.to_string()));
+    }
+    for segment in trimmed.split('/') {
+        if segment.is_empty() {
+            return Err(GmailTriageError::InvalidNewLabelSlug(slug.to_string()));
+        }
+        let Some(first) = segment.chars().next() else {
+            return Err(GmailTriageError::InvalidNewLabelSlug(slug.to_string()));
+        };
+        if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+            return Err(GmailTriageError::InvalidNewLabelSlug(slug.to_string()));
+        }
+        if !segment
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
+        {
+            return Err(GmailTriageError::InvalidNewLabelSlug(slug.to_string()));
+        }
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Sanitizes untrusted email subject and body fields by stripping HTML tags, `<style>`/`<script>`
@@ -102,7 +252,7 @@ pub fn parse_and_validate_classifier_json(
     validate_classifier_output(&parsed, allowlist, min_confidence_bps)
 }
 
-/// Validates a parsed `ClassifierRawOutput` against confidence bounds and `LabelAllowlistConfig`.
+/// Validates a parsed `ClassifierRawOutput` against confidence bounds, `LabelAllowlistConfig`, and new-label slug rules.
 pub fn validate_classifier_output(
     output: &ClassifierRawOutput,
     allowlist: &LabelAllowlistConfig,
@@ -116,16 +266,19 @@ pub fn validate_classifier_output(
         });
     }
 
-    let validated_label = match output.category {
-        ClassifierCategory::Tier2LabelAndArchive => {
-            let label = output
-                .proposed_label
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    GmailTriageError::DisallowedClassifierLabel("<missing>".to_string())
-                })?;
+    let existing_opt = output
+        .proposed_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let new_opt = output
+        .proposed_new_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let validated_label = match existing_opt {
+        Some(label) => {
             if !allowlist.contains(label) {
                 return Err(GmailTriageError::DisallowedClassifierLabel(
                     label.to_string(),
@@ -133,23 +286,27 @@ pub fn validate_classifier_output(
             }
             Some(label.to_string())
         }
-        ClassifierCategory::Tier3Actionable => match output.proposed_label.as_deref() {
-            Some(label) if !label.trim().is_empty() => {
-                let trimmed = label.trim();
-                if !allowlist.contains(trimmed) {
-                    return Err(GmailTriageError::DisallowedClassifierLabel(
-                        trimmed.to_string(),
-                    ));
-                }
-                Some(trimmed.to_string())
-            }
-            _ => None,
-        },
+        None => None,
     };
+
+    let proposed_new_label = match new_opt {
+        Some(slug) => Some(validate_new_label_slug(slug)?),
+        None => None,
+    };
+
+    if output.category == ClassifierCategory::Tier2LabelAndArchive
+        && validated_label.is_none()
+        && proposed_new_label.is_none()
+    {
+        return Err(GmailTriageError::DisallowedClassifierLabel(
+            "<missing>".to_string(),
+        ));
+    }
 
     Ok(ValidatedClassifierDecision {
         category: output.category,
         validated_label,
+        proposed_new_label,
         confidence_bps,
     })
 }
@@ -312,10 +469,43 @@ mod tests {
             eq(&ValidatedClassifierDecision {
                 category: ClassifierCategory::Tier2LabelAndArchive,
                 validated_label: Some("receipts".to_string()),
+                proposed_new_label: None,
                 confidence_bps: 9400,
             })
         );
         Ok(())
+    }
+
+    #[googletest::test]
+    fn parse_and_validate_classifier_json_accepts_valid_new_label_slug()
+    -> Result<(), GmailTriageError> {
+        let allowlist = LabelAllowlistConfig::from_labels(["noise", "receipts"]);
+        let raw_json = r#"{
+            "category": "tier2_label_and_archive",
+            "proposed_label": null,
+            "proposed_new_label": "finance/tax-2026",
+            "confidence": 0.91
+        }"#;
+        let decision = parse_and_validate_classifier_json(raw_json, &allowlist, 7500)?;
+        assert_that!(
+            decision.proposed_new_label,
+            eq(&Some("finance/tax-2026".to_string()))
+        );
+        assert_that!(decision.effective_label(), eq(Some("finance/tax-2026")));
+        Ok(())
+    }
+
+    #[googletest::test]
+    fn parse_and_validate_classifier_json_rejects_invalid_new_label_slug() {
+        let allowlist = LabelAllowlistConfig::from_labels(["noise", "receipts"]);
+        let raw_json = r#"{
+            "category": "tier2_label_and_archive",
+            "proposed_label": null,
+            "proposed_new_label": "../Evil Label!",
+            "confidence": 0.95
+        }"#;
+        let result = parse_and_validate_classifier_json(raw_json, &allowlist, 7500);
+        assert_that!(result, err(anything()));
     }
 
     #[googletest::test]
