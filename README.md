@@ -41,6 +41,7 @@ Email headers and bodies are untrusted external inputs that may contain prompt i
 - **`src/`**: Rust library and CLI crate (`gmail-filters`) for workspace validation, deterministic noise detection, and sandboxed classification orchestration.
 - **`skills/`**: Reusable agent skills (`skills/reviewing-gmail-filters/`) for auditing and updating external `gmailctl` configurations.
 - **`examples/`**: Synthetic `gmailctl` configuration (`examples/config.jsonnet`) demonstrating the three-tier triage model with unit tests.
+- **`PLAN.md`**: Phased CLI implementation plan and milestone roadmap.
 
 ## Usage
 
