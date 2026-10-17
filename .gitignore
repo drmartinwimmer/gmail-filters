@@ -1,0 +1,12 @@
+target/
+.direnv/
+.workspaces/
+.local/
+config/
+fence-*
+*.sock
+result
+result*
+node-compile-cache/
+*credentials*.json
+*token*.json
