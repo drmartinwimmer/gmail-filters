@@ -176,6 +176,47 @@ pub struct GmailctlLabelConfig {
     pub name: String,
 }
 
+/// Synthetic test message entry in `config.jsonnet` declarative tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GmailctlTestMessageConfig {
+    /// Sender address (`from`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Recipient addresses (`to`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to: Vec<String>,
+    /// CC addresses (`cc`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cc: Vec<String>,
+    /// BCC addresses (`bcc`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bcc: Vec<String>,
+    /// Reply-To address (`replyto`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replyto: Option<String>,
+    /// Mailing list identifiers (`lists`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lists: Vec<String>,
+    /// Subject line (`subject`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// Body text (`body`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// Declarative filter unit test entry in `config.jsonnet`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GmailctlTestConfig {
+    /// Test case name.
+    pub name: String,
+    /// Synthetic messages evaluated against the ruleset.
+    #[serde(default)]
+    pub messages: Vec<GmailctlTestMessageConfig>,
+    /// Expected actions applied to the test messages.
+    pub actions: FilterRuleActions,
+}
+
 /// Typed `gmailctl` `v1alpha3` configuration serialized and round-tripped via `serde_json`
 /// (valid Jsonnet since Jsonnet is a strict superset of JSON).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +234,7 @@ pub struct GmailctlConfig {
     pub rules: Vec<SynthesizedFilterRule>,
     /// Declarative unit tests preserved across round-trips.
     #[serde(default)]
-    pub tests: Vec<serde_json::Value>,
+    pub tests: Vec<GmailctlTestConfig>,
 }
 
 impl GmailctlConfig {

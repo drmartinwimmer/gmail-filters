@@ -79,6 +79,14 @@ pub enum GmailTriageError {
     )]
     MissingClassifierDecision(String),
 
+    /// `gws` CLI invocation failed.
+    #[error("gws command failed: {0}")]
+    GwsCommandFailed(String),
+
+    /// Failed to parse JSON returned by `gws`.
+    #[error("Failed to parse gws JSON output: {0}")]
+    GwsParseError(String),
+
     /// I/O error during workspace inspection.
     #[error("I/O error during workspace inspection: {0}")]
     Io(#[from] std::io::Error),
