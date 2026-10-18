@@ -1,4 +1,5 @@
 mod classify;
+mod cluster;
 mod commands;
 mod config;
 mod synthesize;
@@ -10,6 +11,11 @@ pub use classify::{
     SanitizedEmailEnvelope, UntrustedEmailInput, ValidatedClassifierDecision,
     parse_and_validate_classifier_json, sanitize_untrusted_email, validate_classifier_output,
 };
+pub use cluster::{
+    ClusterKey, EmailCluster, FetchedGmailMessage, GwsHeader, GwsMessageListResponse,
+    GwsMessagePayload, GwsMessageResource, GwsMessageStub, cluster_messages, convert_gws_resource,
+    extract_structural_subject_prefix, parse_gws_message_json,
+};
 pub use commands::{
     ApplyCommand, AuditCommand, DiffCommand, GmailTriageCommand, GmailTriageError,
     GmailTriageSubcommand, GmailctlPassthroughCommand, InitCommand, TestCommand, TriageCommand,
@@ -20,15 +26,16 @@ pub use config::{
     resolve_or_default_home_config_dir, validate_synthetic_domains,
 };
 pub use synthesize::{
-    FilterRuleActions, GmailctlAuthorConfig, GmailctlConfig, GmailctlLabelConfig, RuleDisposition,
-    StructuralFilterCriteria, SynthesizedFilterRule, build_cluster_filter_criteria,
-    synthesize_classifier_rule, synthesize_criteria_classifier_rule, synthesize_tier1_noise_rule,
+    FilterRuleActions, GmailctlAuthorConfig, GmailctlConfig, GmailctlLabelConfig,
+    GmailctlTestConfig, GmailctlTestMessageConfig, RuleDisposition, StructuralFilterCriteria,
+    SynthesizedFilterRule, build_cluster_filter_criteria, synthesize_classifier_rule,
+    synthesize_criteria_classifier_rule, synthesize_tier1_noise_rule,
 };
 pub use tier1::{
     SenderEngagementMetrics, Tier1Decision, Tier1ThresholdsConfig, UnsubscribeCapability,
     evaluate_tier1_sender,
 };
-pub use tools::GmailctlRunner;
+pub use tools::{GmailctlRunner, GwsGetMessageParams, GwsGmailRunner, GwsListMessagesParams};
 
 #[cfg(test)]
 mod tests {
