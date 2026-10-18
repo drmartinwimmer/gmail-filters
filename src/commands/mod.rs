@@ -1,8 +1,19 @@
+mod audit;
+mod gmailctl;
+mod init;
+mod triage;
+
+pub use audit::AuditCommand;
+pub use gmailctl::{ApplyCommand, DiffCommand, GmailctlPassthroughCommand, TestCommand};
+pub use init::InitCommand;
+pub use triage::{TriageCommand, TriageOutcome};
+
+use crate::classify::{UntrustedEmailInput, sanitize_untrusted_email};
 use crate::config::{
     LabelAllowlistConfig, TriageWorkspaceConfig, resolve_config_dir, resolve_config_file_path,
 };
 use crate::tools::GmailctlRunner;
-use clap::Args;
+use clap::{Args, Subcommand};
 use std::path::PathBuf;
 
 /// Error type for `gmail-triage` workspace inspection, triage, and `gmailctl` orchestration.
@@ -58,9 +69,44 @@ pub enum GmailTriageError {
         min_bps: u32,
     },
 
+    /// Proposed filter rule violated structural criteria or action safety invariants.
+    #[error("Forbidden filter rule: {0}")]
+    ForbiddenFilterRule(String),
+
+    /// Missing classifier decision when Tier 1 determined the sender is actively engaged.
+    #[error(
+        "Sender '{0}' passed Tier 1 engagement checks; a Tier 2/3 classifier decision is required"
+    )]
+    MissingClassifierDecision(String),
+
     /// I/O error during workspace inspection.
     #[error("I/O error during workspace inspection: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// User-journey subcommands supported by `gmail-triage`.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum GmailTriageSubcommand {
+    /// Run the unified 3-tier email triage pipeline (Tier 1 deterministic -> Tier 2/3 classifier -> safe rule synthesis)
+    Triage(TriageCommand),
+
+    /// Audit `<config-dir>/config.jsonnet` label allowlists, settings, and offline `gmailctl` checks
+    Audit(AuditCommand),
+
+    /// Run `gmailctl test` against the resolved configuration directory
+    Test(TestCommand),
+
+    /// Run `gmailctl diff` against the resolved configuration directory
+    Diff(DiffCommand),
+
+    /// Verify offline tests and run `gmailctl apply` against the resolved configuration directory
+    Apply(ApplyCommand),
+
+    /// Initialize `~/.config/gmail-triage` (or `--config <dir>`) with starter `config.jsonnet` and `gmail-triage.toml`
+    Init(InitCommand),
+
+    /// Pass arbitrary subcommands and arguments to `gmailctl` with `--config <dir>` automatically set
+    Gmailctl(GmailctlPassthroughCommand),
 }
 
 /// Command-line arguments for `gmail-triage`.
@@ -73,23 +119,51 @@ pub struct GmailTriageCommand {
     /// Silence non-essential logging output
     #[arg(short, long)]
     quiet: bool,
+
+    /// User-journey subcommand (`triage`, `audit`, `test`, `diff`, `apply`, `init`, `gmailctl`)
+    #[command(subcommand)]
+    subcommand: Option<GmailTriageSubcommand>,
 }
 
 impl GmailTriageCommand {
     /// Creates a new `GmailTriageCommand`.
     pub fn new(config: Option<PathBuf>, quiet: bool) -> Self {
-        Self { config, quiet }
+        Self {
+            config,
+            quiet,
+            subcommand: None,
+        }
+    }
+
+    /// Creates a new `GmailTriageCommand` with an explicit subcommand.
+    pub fn with_subcommand(subcommand: GmailTriageSubcommand, quiet: bool) -> Self {
+        Self {
+            config: None,
+            quiet,
+            subcommand: Some(subcommand),
+        }
     }
 
     /// Executes the command.
     pub fn run(self) -> Result<(), GmailTriageError> {
-        let target_dir = resolve_config_dir(self.config)?;
-        let _workspace_cfg = TriageWorkspaceConfig::load_from_dir(&target_dir)?;
-        if target_dir.join("config.jsonnet").exists() {
-            let config_file = resolve_config_file_path(&target_dir)?;
-            let _allowlist = LabelAllowlistConfig::load_from_path(&config_file)?;
+        match self.subcommand {
+            Some(GmailTriageSubcommand::Triage(cmd)) => cmd.run().map(|_| ()),
+            Some(GmailTriageSubcommand::Audit(cmd)) => cmd.run().map(|_| ()),
+            Some(GmailTriageSubcommand::Test(cmd)) => cmd.run(),
+            Some(GmailTriageSubcommand::Diff(cmd)) => cmd.run().map(|_| ()),
+            Some(GmailTriageSubcommand::Apply(cmd)) => cmd.run().map(|_| ()),
+            Some(GmailTriageSubcommand::Init(cmd)) => cmd.run().map(|_| ()),
+            Some(GmailTriageSubcommand::Gmailctl(cmd)) => cmd.run().map(|_| ()),
+            None => {
+                let target_dir = resolve_config_dir(self.config)?;
+                let _workspace_cfg = TriageWorkspaceConfig::load_from_dir(&target_dir)?;
+                if target_dir.join("config.jsonnet").exists() {
+                    let config_file = resolve_config_file_path(&target_dir)?;
+                    let _allowlist = LabelAllowlistConfig::load_from_path(&config_file)?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     /// Audits the target configuration directory using `LabelAllowlistConfig` extraction and `gmailctl`.
@@ -102,6 +176,11 @@ impl GmailTriageCommand {
         let allowlist = LabelAllowlistConfig::load_from_path(&target_dir)?;
         runner.verify_offline(&target_dir)?;
         Ok(allowlist)
+    }
+
+    /// Sanitizes an untrusted email input into a bounded `SanitizedEmailEnvelope` prompt.
+    pub fn sanitize_prompt(input: &UntrustedEmailInput) -> String {
+        sanitize_untrusted_email(input).to_delimited_prompt()
     }
 }
 

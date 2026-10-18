@@ -1,10 +1,10 @@
-# gmail-filters
+# gmail-triage (`gmail-filters`)
 
 [![CI](https://github.com/drmartinwimmer/gmail-filters/actions/workflows/ci.yml/badge.svg)](https://github.com/drmartinwimmer/gmail-filters/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![MSRV: 1.88+](https://img.shields.io/badge/MSRV-1.88%2B-blue.svg?logo=rust)](https://www.rust-lang.org/)
 
-Agentic skills and Rust CLI tools for safely categorizing emails, auditing [`gmailctl`](https://github.com/mbrt/gmailctl) configurations, and updating Gmail filters.
+Agentic skills and the `gmail-triage` Rust CLI tool for safely triaging emails, auditing [`gmailctl`](https://github.com/mbrt/gmailctl) configurations, and updating Gmail filters.
 
 ---
 
@@ -18,7 +18,7 @@ Agentic skills and Rust CLI tools for safely categorizing emails, auditing [`gma
 ### 1. Strict Separation of Tooling and Personal Configuration
 
 - **Tooling & Skills (`drmartinwimmer/gmail-filters`)**: This repository contains only generic Rust CLI/library tooling (`src/`), reusable agent skills (`skills/`), and synthetic test fixtures (`examples/config.jsonnet`). Zero personal email addresses, sender rules, or credentials live here.
-- **Personal Configuration (Separate Private Repository)**: Your personal `config.jsonnet` and label taxonomy live in a dedicated private repository (or `~/.config/gmail-filters/`) and are passed at runtime via `--config <path>`.
+- **Unified Home Configuration (`~/.config/gmail-triage/`)**: Your personal `config.jsonnet` and `gmail-triage.toml` live in `~/.config/gmail-triage/` (or a custom directory set via `$GMAIL_TRIAGE_CONFIG_DIR` / `--config <path>`), which can also be managed declaratively via the Nix Home Manager module exported by `flake.nix`.
 
 ### 2. Three-Tier Email Triage Model
 
@@ -34,28 +34,59 @@ Email headers and bodies are untrusted external inputs that may contain prompt i
 
 - **Privilege Separation**: Raw email content is only ever processed by a quarantined, tool-less local LLM classifier whose output is constrained to a strict JSON schema (e.g., selecting a proposed label from a fixed allowlist).
 - **Sanitized Control Plane**: The filter-synthesis tool and review agent operate strictly on validated structural metadata (verified sender domains, `List-Id`, engagement metrics, and allowlisted label enums)—never raw email bodies.
-- **Hard Action Guardrails**: Automated tooling forbids synthesizing high-risk Gmail actions (`forward`, `delete: true`, or raw `query` strings derived from email text) and requires offline verification (`gmailctl test`, `gmailctl debug`) plus human review (`gmailctl diff`).
+- **Hard Action Guardrails**: Automated tooling forbids synthesizing high-risk Gmail actions (`forward`, `delete: true`, or raw `query` strings derived from email text) and requires offline verification (`gmail-triage test`) plus human review (`gmail-triage diff`).
 
 ## Repository Layout
 
-- **`src/`**: Rust library and CLI crate (`gmail-filters`) for workspace validation, deterministic noise detection, and sandboxed classification orchestration.
+- **`src/`**: Rust library and CLI crate (`gmail-triage`) for unified 3-tier email triage, workspace auditing, and `gmailctl` orchestration.
 - **`skills/`**: Reusable agent skills (`skills/reviewing-gmail-filters/`) for auditing and updating external `gmailctl` configurations.
 - **`examples/`**: Synthetic `gmailctl` configuration (`examples/config.jsonnet`) demonstrating the three-tier triage model with unit tests.
 - **`PLAN.md`**: Phased CLI implementation plan and milestone roadmap.
 
 ## Usage
 
-### Inspect & Verify a Filter Configuration Directory
+### Initialize or Audit Your Unified Configuration Directory (`~/.config/gmail-triage/`)
 
 ```bash
-cargo run -- --path /path/to/private/gmail-filters-config
+# Scaffold ~/.config/gmail-triage/ with config.jsonnet and gmail-triage.toml
+gmail-triage init
+
+# Audit declared labels, settings, and offline gmailctl compilation
+gmail-triage audit --run-gmailctl
 ```
 
-### Run `gmailctl` Tests on the Synthetic Example
+### Triage a Sender Through the 3-Tier Pipeline
+
+`gmail-triage triage` hides the multi-tier complexity behind a single command—evaluating Tier 1 deterministic unopened/bulk signals first, and falling back to Tier 2/3 validated classification and rule synthesis when needed:
 
 ```bash
-gmailctl test --config examples
-gmailctl debug --config examples
+# Tier 1: Unopened bulk sender -> recommends unsubscribe or synthesizes a 'noise' rule
+gmail-triage triage \
+  --config examples \
+  --from promotions@marketing.example.com \
+  --total-received 10 \
+  --opened-count 0 \
+  --archived-unread-count 10 \
+  --precedence-bulk
+
+# Tier 2: Engaged sender with sandboxed classifier output -> synthesizes a skip-inbox rule
+gmail-triage triage \
+  --config examples \
+  --from billing@service.example.com \
+  --total-received 6 \
+  --opened-count 5 \
+  --decision-json '{"category":"tier2_label_and_archive","proposed_label":"receipts","confidence":0.94}'
+```
+
+### Wrapped `gmailctl` Commands (Auto-Injects `--config`)
+
+Because `gmailctl` hardcodes `~/.gmailctl`, `gmail-triage` wraps `gmailctl` and automatically passes `--config <resolved-config-dir>`:
+
+```bash
+gmail-triage test
+gmail-triage diff
+gmail-triage apply
+gmail-triage gmailctl debug
 ```
 
 ## Development

@@ -1,4 +1,4 @@
-use crate::GmailTriageError;
+use crate::{GmailTriageError, GmailctlConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::env;
@@ -105,18 +105,15 @@ impl LabelAllowlistConfig {
         Self { labels }
     }
 
-    /// Parses declared label names (`{ name: '...' }` or `{ name: "..." }`) from a `config.jsonnet` string.
+    /// Parses declared label names (`labels: [{ "name": "..." }]`) from a `config.jsonnet` document via `serde_json`.
     pub fn parse_jsonnet(content: &str) -> Result<Self, GmailTriageError> {
-        let mut labels = BTreeSet::new();
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("//") || trimmed.starts_with('#') {
-                continue;
-            }
-            if let Some(name) = extract_label_name_from_line(trimmed) {
-                labels.insert(name);
-            }
-        }
+        let cfg = GmailctlConfig::parse_jsonnet(content)?;
+        let labels: BTreeSet<String> = cfg
+            .labels
+            .into_iter()
+            .map(|l| l.name)
+            .filter(|name| !name.trim().is_empty())
+            .collect();
         if labels.is_empty() {
             return Err(GmailTriageError::EmptyLabelAllowlist);
         }
@@ -261,24 +258,6 @@ fn resolve_env_config_dir() -> Option<PathBuf> {
     None
 }
 
-fn extract_label_name_from_line(trimmed: &str) -> Option<String> {
-    if !trimmed.starts_with('{') {
-        return None;
-    }
-    let (_, after_name) = trimmed.split_once("name:")?;
-    let after_name = after_name.trim();
-    let quote = after_name.chars().next()?;
-    if quote != '\'' && quote != '"' {
-        return None;
-    }
-    let rest = after_name.get(1..)?;
-    let (label, _) = rest.split_once(quote)?;
-    if label.trim().is_empty() {
-        return None;
-    }
-    Some(label.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +277,7 @@ mod tests {
 
     #[googletest::test]
     fn parse_jsonnet_empty_labels_returns_error() {
-        let content = "{ version: 'v1alpha3', labels: [], rules: [] }";
+        let content = r#"{"version": "v1alpha3", "labels": [], "rules": []}"#;
         let result = LabelAllowlistConfig::parse_jsonnet(content);
         assert_that!(result, err(anything()));
     }
@@ -326,7 +305,7 @@ mod tests {
 
     #[googletest::test]
     fn validate_synthetic_domains_rejects_personal_domain() {
-        let content = "{ from: 'alice@personal-domain.io' }";
+        let content = r#"{"from": "alice@personal-domain.io"}"#;
         let result = validate_synthetic_domains(content);
         assert_that!(result, err(anything()));
     }

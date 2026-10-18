@@ -17,7 +17,7 @@ We evaluated crates.io availability and semantic fit for this tool:
 | `gmail-sieve`      | Yes                  | Evocative, though "Sieve" is an RFC 5228 mail filtering language that Gmail does not natively use             |
 | `gmailctl-triage`  | Yes                  | Explicitly pairs with `gmailctl`, but slightly more verbose to type                                           |
 
-**Decision**: Rename the crate and binary to **`gmail-triage`** (library `gmail_triage`), while supporting `$GMAIL_TRIAGE_CONFIG_DIR` (and `$GMAIL_FILTERS_CONFIG_DIR` as a fallback) for configuration discovery.
+**Decision**: Rename the crate and binary to **`gmail-triage`** (library `gmail_triage`), using `$GMAIL_TRIAGE_CONFIG_DIR` and `~/.config/gmail-triage/` for configuration discovery.
 
 ## User Journey & Ergonomic CLI Surface
 

@@ -1,6 +1,7 @@
 mod classify;
 mod commands;
 mod config;
+mod synthesize;
 mod tier1;
 mod tools;
 
@@ -9,10 +10,19 @@ pub use classify::{
     SanitizedEmailEnvelope, UntrustedEmailInput, ValidatedClassifierDecision,
     parse_and_validate_classifier_json, sanitize_untrusted_email, validate_classifier_output,
 };
-pub use commands::{GmailTriageCommand, GmailTriageError};
+pub use commands::{
+    ApplyCommand, AuditCommand, DiffCommand, GmailTriageCommand, GmailTriageError,
+    GmailTriageSubcommand, GmailctlPassthroughCommand, InitCommand, TestCommand, TriageCommand,
+    TriageOutcome,
+};
 pub use config::{
     LabelAllowlistConfig, TriageWorkspaceConfig, resolve_config_dir, resolve_config_file_path,
     resolve_or_default_home_config_dir, validate_synthetic_domains,
+};
+pub use synthesize::{
+    FilterRuleActions, GmailctlAuthorConfig, GmailctlConfig, GmailctlLabelConfig, RuleDisposition,
+    StructuralFilterCriteria, SynthesizedFilterRule, build_cluster_filter_criteria,
+    synthesize_classifier_rule, synthesize_criteria_classifier_rule, synthesize_tier1_noise_rule,
 };
 pub use tier1::{
     SenderEngagementMetrics, Tier1Decision, Tier1ThresholdsConfig, UnsubscribeCapability,
