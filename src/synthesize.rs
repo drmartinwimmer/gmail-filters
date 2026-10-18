@@ -355,9 +355,12 @@ pub fn synthesize_criteria_classifier_rule(
 ) -> Result<SynthesizedFilterRule, GmailTriageError> {
     let actions = match decision.category {
         ClassifierCategory::Tier2LabelAndArchive => {
-            let label = decision.validated_label.clone().ok_or_else(|| {
-                GmailTriageError::DisallowedClassifierLabel("<missing>".to_string())
-            })?;
+            let label = decision
+                .effective_label()
+                .map(ToString::to_string)
+                .ok_or_else(|| {
+                    GmailTriageError::DisallowedClassifierLabel("<missing>".to_string())
+                })?;
             FilterRuleActions {
                 disposition: RuleDisposition::SkipInbox,
                 labels: vec![label],
@@ -368,7 +371,11 @@ pub fn synthesize_criteria_classifier_rule(
         }
         ClassifierCategory::Tier3Actionable => FilterRuleActions {
             disposition: RuleDisposition::KeepInInboxImportant,
-            labels: decision.validated_label.iter().cloned().collect(),
+            labels: decision
+                .effective_label()
+                .map(ToString::to_string)
+                .into_iter()
+                .collect(),
             forward: None,
             delete: false,
             mark_spam: None,
@@ -506,6 +513,7 @@ mod tests {
         let decision = ValidatedClassifierDecision {
             category: ClassifierCategory::Tier2LabelAndArchive,
             validated_label: Some("receipts".to_string()),
+            proposed_new_label: None,
             confidence_bps: 9500,
         };
         let filter = build_cluster_filter_criteria(
@@ -558,6 +566,7 @@ mod tests {
             &ValidatedClassifierDecision {
                 category: ClassifierCategory::Tier2LabelAndArchive,
                 validated_label: Some("receipts".to_string()),
+                proposed_new_label: None,
                 confidence_bps: 9500,
             },
             &allowlist,

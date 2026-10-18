@@ -60,6 +60,10 @@ pub enum GmailTriageError {
     #[error("Classifier proposed disallowed label '{0}'")]
     DisallowedClassifierLabel(String),
 
+    /// Classifier proposed a `proposed_new_label` that violated slug naming rules.
+    #[error("Invalid proposed new label slug: {0}")]
+    InvalidNewLabelSlug(String),
+
     /// Classifier confidence was below the minimum required threshold.
     #[error("Classifier confidence {actual_bps} bps is below minimum threshold {min_bps} bps")]
     LowClassifierConfidence {
@@ -87,6 +91,10 @@ pub enum GmailTriageError {
     #[error("Failed to parse gws JSON output: {0}")]
     GwsParseError(String),
 
+    /// Sandboxed local classifier backend execution failed.
+    #[error("Classifier backend execution failed: {0}")]
+    ClassifierBackendFailed(String),
+
     /// I/O error during workspace inspection.
     #[error("I/O error during workspace inspection: {0}")]
     Io(#[from] std::io::Error),
@@ -95,7 +103,7 @@ pub enum GmailTriageError {
 /// User-journey subcommands supported by `gmail-triage`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum GmailTriageSubcommand {
-    /// Run the unified 3-tier email triage pipeline (Tier 1 deterministic -> Tier 2/3 classifier -> safe rule synthesis)
+    /// Run the unified 3-tier email triage pipeline (fetches via `gws` or evaluates explicit sender/cluster metrics, runs Tier 1 + sandboxed LLM, and synthesizes/patches `config.jsonnet`)
     Triage(TriageCommand),
 
     /// Audit `<config-dir>/config.jsonnet` label allowlists, settings, and offline `gmailctl` checks

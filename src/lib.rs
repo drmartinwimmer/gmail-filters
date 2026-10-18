@@ -7,9 +7,11 @@ mod tier1;
 mod tools;
 
 pub use classify::{
-    ClassifierCategory, ClassifierRawOutput, MAX_BODY_SNIPPET_CHARS, MAX_SUBJECT_CHARS,
-    SanitizedEmailEnvelope, UntrustedEmailInput, ValidatedClassifierDecision,
-    parse_and_validate_classifier_json, sanitize_untrusted_email, validate_classifier_output,
+    ClassifierCategory, ClassifierJsonSchema, ClassifierJsonSchemaProperties, ClassifierRawOutput,
+    JsonSchemaEnumProperty, JsonSchemaNullableStringProperty, JsonSchemaNumberProperty,
+    MAX_BODY_SNIPPET_CHARS, MAX_SUBJECT_CHARS, SanitizedEmailEnvelope, UntrustedEmailInput,
+    ValidatedClassifierDecision, classifier_output_json_schema, parse_and_validate_classifier_json,
+    sanitize_untrusted_email, validate_classifier_output, validate_new_label_slug,
 };
 pub use cluster::{
     ClusterKey, EmailCluster, FetchedGmailMessage, GwsHeader, GwsMessageListResponse,
@@ -22,7 +24,8 @@ pub use commands::{
     TriageOutcome,
 };
 pub use config::{
-    LabelAllowlistConfig, TriageWorkspaceConfig, resolve_config_dir, resolve_config_file_path,
+    ClassifierBackendConfig, FenceCommandBackendConfig, LabelAllowlistConfig, OpenAiBackendConfig,
+    TriageWorkspaceConfig, resolve_config_dir, resolve_config_file_path,
     resolve_or_default_home_config_dir, validate_synthetic_domains,
 };
 pub use synthesize::{
@@ -35,7 +38,13 @@ pub use tier1::{
     SenderEngagementMetrics, Tier1Decision, Tier1ThresholdsConfig, UnsubscribeCapability,
     evaluate_tier1_sender,
 };
-pub use tools::{GmailctlRunner, GwsGetMessageParams, GwsGmailRunner, GwsListMessagesParams};
+pub use tools::{
+    FenceCommandClassifierRunner, GmailctlRunner, GwsGetMessageParams, GwsGmailRunner,
+    GwsListMessagesParams, LocalClassifierRunner, OpenAiChatChoice, OpenAiChatCompletionRequest,
+    OpenAiChatCompletionResponse, OpenAiChatMessage, OpenAiHttpClassifierRunner,
+    OpenAiJsonSchemaSpec, OpenAiResponseFormat, OpenAiToolDefinition,
+    build_openai_chat_request_json, extract_openai_message_content,
+};
 
 #[cfg(test)]
 mod tests {

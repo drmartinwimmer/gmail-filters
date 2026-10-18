@@ -33,7 +33,7 @@ impl InitCommand {
         let settings_toml_path = target_dir.join("gmail-triage.toml");
         if !settings_toml_path.exists() {
             let default_cfg = TriageWorkspaceConfig::default();
-            fs::write(&settings_toml_path, default_cfg.to_toml_string())?;
+            fs::write(&settings_toml_path, default_cfg.to_toml_string()?)?;
         }
 
         Ok(target_dir)
