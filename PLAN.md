@@ -122,6 +122,26 @@ All user-specific configuration lives in a single XDG-compliant directory (`$GMA
 
 - **Modules**: `src/synthesize.rs`, `src/commands.rs`, `src/lib.rs`, `src/main.rs`, `README.md`
 - **Capabilities**:
-  - Synthesize safe `gmailctl` Jsonnet rules (`SynthesizedFilterRule`) using strictly structural criteria (`From`, `To`, `List`, `Or`) and validated dispositions (`ArchiveAndMarkRead`, `SkipInbox`, `KeepInInboxImportant`), rejecting `forward`, `delete: true`, `markSpam: false`, and raw `query` strings.
+  - Synthesize safe `gmailctl` Jsonnet rules (`SynthesizedFilterRule`) using strictly structural criteria (`From`, `To`, `List`, `Subject`, `Or`, `And`) and validated dispositions (`ArchiveAndMarkRead`, `SkipInbox`, `KeepInInboxImportant`), rejecting `forward`, `delete: true`, `markSpam: false`, and raw `query` strings.
   - Orchestrate the full 3-tier pipeline in `gmail-triage triage` (running Tier 1 first, then Tier 2/3 classification and synthesis when needed, hiding internal steps behind one command).
   - Expose user-journey subcommands: `triage`, `audit`, `test`, `diff`, `apply`, `init`, and `gmailctl`.
+
+### Milestone 5: `gws` Email Retrieval & Multi-Stream Sub-Clustering
+
+- **Modules**: `src/cluster.rs`, `src/tools/mod.rs`, `src/synthesize.rs`, `src/lib.rs`
+- **Capabilities**:
+  - Fetch Gmail message IDs and metadata/snippets via the `gws` CLI (`GwsGmailRunner`: `gws gmail users messages list` and `gws gmail users messages get`).
+  - Group messages into distinct `EmailCluster` streams keyed by `(from_address, list_id, recipient_to, subject_prefix)` so different message streams from the same sender (e.g., invoices vs. security alerts vs. digests) are triaged separately and synthesize compound `and: [{ from: '...' }, { to: '...' }, { subject: '...' }]` rules.
+
+### Milestone 6: Pluggable Local/Sandboxed LLM Backends (`open_ai_http` & `fence_command`) and New Label Proposals
+
+- **Modules**: `src/classify.rs`, `src/config.rs`, `src/tools/mod.rs`, `src/tools/gmailctl.rs`, `src/tools/gws.rs`, `src/tools/classifier.rs`, `src/lib.rs`
+- **Capabilities**:
+  - Support mutually exclusive `ClassifierBackendConfig::OpenAiHttp(OpenAiBackendConfig)` (any OpenAI-compatible `/v1/chat/completions` endpoint, defaulting to local Ollama at `http://127.0.0.1:11434/v1/chat/completions`) and `ClassifierBackendConfig::FenceCommand(FenceCommandBackendConfig)` in `gmail-triage.toml` (deserialized via `serde` and `toml`), backed by the `LocalClassifierRunner` enum (`OpenAiHttpClassifierRunner` and `FenceCommandClassifierRunner`).
+  - Allow the classifier to either select an existing label (`proposed_label` from `LabelAllowlistConfig`) or propose a new label slug (`proposed_new_label`) strictly validated against `^[a-z0-9]+(/[a-z0-9_-]+)*$`.
+
+### Milestone 7: End-to-End `gws` Triage & `config.jsonnet` Patching
+
+- **Modules**: `src/synthesize.rs`, `src/commands.rs`, `src/lib.rs`, `README.md`, `skills/reviewing-gmail-filters/SKILL.md`
+- **Capabilities**:
+  - Wire `GwsGmailRunner::fetch_and_cluster`, `LocalClassifierRunner`, and `patch_config_jsonnet` into `gmail-triage triage` (`--write-config`) so newly proposed labels and synthesized sub-cluster rules are automatically inserted into `<config-dir>/config.jsonnet`.

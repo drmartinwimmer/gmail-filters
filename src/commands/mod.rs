@@ -77,12 +77,6 @@ pub enum GmailTriageError {
     #[error("Forbidden filter rule: {0}")]
     ForbiddenFilterRule(String),
 
-    /// Missing classifier decision when Tier 1 determined the sender is actively engaged.
-    #[error(
-        "Sender '{0}' passed Tier 1 engagement checks; a Tier 2/3 classifier decision is required"
-    )]
-    MissingClassifierDecision(String),
-
     /// `gws` CLI invocation failed.
     #[error("gws command failed: {0}")]
     GwsCommandFailed(String),
@@ -103,7 +97,7 @@ pub enum GmailTriageError {
 /// User-journey subcommands supported by `gmail-triage`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum GmailTriageSubcommand {
-    /// Run the unified 3-tier email triage pipeline (fetches via `gws` or evaluates explicit sender/cluster metrics, runs Tier 1 + sandboxed LLM, and synthesizes/patches `config.jsonnet`)
+    /// Run the unified 3-tier email triage pipeline (fetches messages via `gws`, groups into sub-clusters, runs Tier 1 + sandboxed LLM, and synthesizes/patches `config.jsonnet`)
     Triage(TriageCommand),
 
     /// Audit `<config-dir>/config.jsonnet` label allowlists, settings, and offline `gmailctl` checks

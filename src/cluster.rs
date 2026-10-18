@@ -1,8 +1,19 @@
 use crate::classify::{SanitizedEmailEnvelope, UntrustedEmailInput, sanitize_untrusted_email};
-use crate::tier1::{SenderEngagementMetrics, UnsubscribeCapability};
-use crate::{GmailTriageError, StructuralFilterCriteria, build_cluster_filter_criteria};
+use crate::config::{LabelAllowlistConfig, TriageWorkspaceConfig, resolve_config_file_path};
+use crate::synthesize::{
+    SynthesizedFilterRule, build_cluster_filter_criteria, patch_config_jsonnet,
+    synthesize_cluster_tier1_noise_rule, synthesize_criteria_classifier_rule,
+};
+use crate::tier1::{
+    SenderEngagementMetrics, Tier1Decision, Tier1ThresholdsConfig, UnsubscribeCapability,
+    evaluate_tier1_sender,
+};
+use crate::tools::LocalClassifierRunner;
+use crate::{GmailTriageError, StructuralFilterCriteria};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
 /// Normalized representation of a single Gmail message fetched via `gws`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +341,113 @@ fn extract_list_id(raw: &str) -> String {
         .filter(|ch| !ch.is_whitespace() && !matches!(ch, '\'' | '"' | '<' | '>'))
         .collect::<String>()
         .to_ascii_lowercase()
+}
+
+/// Unified outcome of running the 3-tier `triage` pipeline for an `EmailCluster` stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum TriageOutcome {
+    /// Tier 1: Unsubscribe via verified `List-Unsubscribe` header (no filter rule needed).
+    Unsubscribe {
+        /// Verified sender address.
+        from: String,
+        /// Optional `List-Id` identifier.
+        list_id: Option<String>,
+        /// Detected unsubscribe capability.
+        capability: UnsubscribeCapability,
+    },
+    /// Tier 1 / Tier 2 / Tier 3: Synthesized a validated `gmailctl` filter rule.
+    SynthesizedRule {
+        /// Structured rule representation.
+        rule: SynthesizedFilterRule,
+        /// Rendered `gmailctl` Jsonnet snippet.
+        jsonnet: String,
+    },
+}
+
+/// Evaluates a slice of `EmailCluster` streams through Tier 1 and the configured `LocalClassifierRunner`,
+/// optionally patching `<target_dir>/config.jsonnet` with approved new labels and synthesized rules.
+pub fn triage_email_clusters(
+    target_dir: &Path,
+    clusters: &[EmailCluster],
+    classifier: &LocalClassifierRunner,
+    write_config: bool,
+) -> Result<Vec<TriageOutcome>, GmailTriageError> {
+    let workspace_cfg = TriageWorkspaceConfig::load_from_dir(target_dir)?;
+    let mut allowlist = LabelAllowlistConfig::load_from_path(target_dir)?;
+    let thresholds = Tier1ThresholdsConfig {
+        min_messages_for_engagement: workspace_cfg.min_messages_for_engagement,
+        max_open_rate_bps: workspace_cfg.max_open_rate_bps,
+        min_unread_archive_rate_bps: workspace_cfg.min_unread_archive_rate_bps,
+    };
+
+    let mut outcomes = Vec::with_capacity(clusters.len());
+    let mut new_labels_to_insert = Vec::new();
+    let mut rules_to_insert = Vec::new();
+
+    for cluster in clusters {
+        let tier1_decision = evaluate_tier1_sender(&cluster.engagement, &thresholds)?;
+        match tier1_decision {
+            Tier1Decision::Unsubscribe {
+                from,
+                list_id,
+                capability,
+            } => {
+                outcomes.push(TriageOutcome::Unsubscribe {
+                    from,
+                    list_id,
+                    capability,
+                });
+            }
+            Tier1Decision::RouteToNoise { .. } => {
+                let rule =
+                    synthesize_cluster_tier1_noise_rule(&cluster.key, &tier1_decision, &allowlist)?
+                        .ok_or_else(|| {
+                            GmailTriageError::ForbiddenFilterRule(
+                                "Failed to synthesize cluster Tier 1 noise rule".to_string(),
+                            )
+                        })?;
+                let jsonnet = rule.to_jsonnet(&allowlist)?;
+                rules_to_insert.push(rule.clone());
+                outcomes.push(TriageOutcome::SynthesizedRule { rule, jsonnet });
+            }
+            Tier1Decision::KeepForTriage { .. } => {
+                let validated = classifier.classify_envelope(
+                    &cluster.representative_sample,
+                    &allowlist,
+                    workspace_cfg.min_confidence_bps,
+                )?;
+                if let Some(new_label) = validated.proposed_new_label.as_deref() {
+                    allowlist.insert_label(new_label);
+                    new_labels_to_insert.push(new_label.to_string());
+                }
+                let filter = build_cluster_filter_criteria(
+                    &cluster.key.from_address,
+                    cluster.key.list_id.as_deref(),
+                    cluster.key.to_address.as_deref(),
+                    cluster.key.subject_prefix.as_deref(),
+                );
+                let rule = synthesize_criteria_classifier_rule(filter, &validated, &allowlist)?;
+                let jsonnet = rule.to_jsonnet(&allowlist)?;
+                rules_to_insert.push(rule.clone());
+                outcomes.push(TriageOutcome::SynthesizedRule { rule, jsonnet });
+            }
+        }
+    }
+
+    if write_config && (!new_labels_to_insert.is_empty() || !rules_to_insert.is_empty()) {
+        let config_file = resolve_config_file_path(target_dir)?;
+        let original = fs::read_to_string(&config_file)?;
+        let patched = patch_config_jsonnet(
+            &original,
+            &new_labels_to_insert,
+            &rules_to_insert,
+            &mut allowlist,
+        )?;
+        fs::write(&config_file, patched)?;
+    }
+
+    Ok(outcomes)
 }
 
 #[cfg(test)]
